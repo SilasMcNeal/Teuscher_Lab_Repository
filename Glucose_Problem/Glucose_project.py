@@ -10,7 +10,7 @@ from sklearn.model_selection import train_test_split
 import torch.optim as optim
 
 # --- Data preparation ---
-csv_file_path = "glucose.csv" # Path to csv file
+csv_file_path = "insert file path here" # Path to csv file
 
 #ensures the path is correct
 if not os.path.exists(csv_file_path):
