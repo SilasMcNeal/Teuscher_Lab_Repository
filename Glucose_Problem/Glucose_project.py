@@ -8,9 +8,11 @@ from torch.utils.data import Dataset, DataLoader
 from sklearn.preprocessing import MinMaxScaler
 from sklearn.model_selection import train_test_split
 import torch.optim as optim
+from sklearn.metrics import confusion_matrix
+import seaborn as sns
 
 # --- Data preparation ---
-csv_file_path = "insert file path here" # Path to csv file
+csv_file_path = "glucose.csv" # Path to csv file
 
 #ensures the path is correct
 if not os.path.exists(csv_file_path):
@@ -57,12 +59,11 @@ for i in range(len(df_cgm) - window_size):
 X = np.array(X)
 y = np.array(y)
 
-#Splits the data into training and test sets (80/20),
-# stratified by the label to preserve class balance. 
+#Splits the data into training and test sets 80/20,
+# stratified by the label to keep balance. 
 # random seed is set to 50 for reproducibility
 X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=50, stratify=y) 
 
-# --- SCALE THE DATA ---
 # 1. Initialize the Scaler
 scaler = MinMaxScaler(feature_range=(0, 1))
 
@@ -85,7 +86,6 @@ X_train_scaled = X_train_scaled_reshaped.reshape(n_samples_train, window_size)
 X_test_scaled = X_test_scaled_reshaped.reshape(n_samples_test, window_size)
 
 #wraps data for pytorch, converts to tensors
-# Dataset class
 class GlucoseDataset(Dataset):
     def __init__(self, X, y):
         self.X = torch.tensor(X, dtype=torch.float32)
@@ -101,7 +101,7 @@ class GlucoseDataset(Dataset):
 train_dataset = GlucoseDataset(X_train_scaled, y_train)
 test_dataset = GlucoseDataset(X_test_scaled, y_test)
 
-#dataloader instances + batch size
+#dataloader instances, batch size
 batch_size = 32
 train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
 test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
@@ -156,7 +156,7 @@ print("\nModel architecture:")
 print(model)
 
 #hyperparameters
-num_epochs = 250
+num_epochs = 350
 learning_rate = 0.0032945552201069143
 
 # Calculate pos_weight for BCEWithLogitsLoss
@@ -224,3 +224,49 @@ plt.tight_layout()
 plt.savefig('training_curves.png')  # Save the figure to a PNG file
 plt.close()
 print('Training curves saved to training_curves.png')
+
+# --- Generate and Plot Confusion Matrix ---
+print("\nGenerating confusion matrix on the test set...")
+model.eval() # Set the model to evaluation mode
+
+all_labels = []
+all_predictions = []
+
+# No gradient is needed for evaluation
+with torch.no_grad():
+    for batch_X, batch_y in test_loader:
+        # Move data to the appropriate device
+        batch_X = batch_X.unsqueeze(-1).to(device)
+
+        # Get model outputs
+        outputs = model(batch_X)
+
+        # Apply sigmoid and threshold to get predictions (0 or 1)
+        predicted = (torch.sigmoid(outputs) >= 0.5).float()
+
+        # Move predictions and labels to CPU and convert to numpy for sklearn
+        all_predictions.extend(predicted.cpu().numpy())
+        all_labels.extend(batch_y.cpu().numpy())
+
+# Convert lists of lists to a flat numpy array
+all_labels = np.array(all_labels).flatten()
+all_predictions = np.array(all_predictions).flatten()
+
+# Compute the confusion matrix
+cm = confusion_matrix(all_labels, all_predictions)
+
+# Plot the confusion matrix
+plt.figure(figsize=(8, 6))
+sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
+            xticklabels=['No Drop', 'Major Drop'],
+            yticklabels=['No Drop', 'Major Drop'])
+plt.title('Confusion Matrix')
+plt.ylabel('True Label')
+plt.xlabel('Predicted Label')
+plt.tight_layout()
+
+# Save to file
+plt.savefig('confusion_matrix.png')
+plt.close()
+
+print('Confusion matrix saved to confusion_matrix.png')
