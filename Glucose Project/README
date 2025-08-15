@@ -1,3 +1,0 @@
-This program is a feed forward and Long Short Term Memory Network used to predict a blood sugar drop before it happens.
-
-With our data frame being loaded with glucose levels measured every 5 minutes, we can train our network by looking ahead by 6 measures, (5 * 6 = 30)
