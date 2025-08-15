@@ -1,138 +1,108 @@
+import reservoirpy as rpy
+from reservoirpy.nodes import Reservoir, Ridge
 import os
-import sys
-import numpy as np
 import pandas as pd
+import numpy as np
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import MinMaxScaler
-from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import classification_report, confusion_matrix, accuracy_score
 import matplotlib.pyplot as plt
 import seaborn as sns
-from tqdm import tqdm
-from reservoirpy.nodes import Reservoir
 
-# suppress verbose output
-class SuppressOutput:
-    def __enter__(self):
-        self._original_stdout = sys.stdout
-        self._original_stderr = sys.stderr
-        sys.stdout = open(os.devnull, 'w')
-        sys.stderr = open(os.devnull, 'w')
+# Set verbosity and seed for reproducibility
+rpy.verbosity(0)
+rpy.set_seed(42)
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        sys.stdout.close()
-        sys.stdout = self._original_stdout
-        sys.stderr.close()
-        sys.stderr = self._original_stderr
+# --- 1. Load Data ---
+csv_file_path = "diabetes.csv"
 
-def main():
-    csv_file_path = "glucose.csv"
+if not os.path.exists(csv_file_path):
+    print("Error: Could not find data file, please check file location.")
+    exit()
+else:
+    print("Loading data")
 
-    if not os.path.exists(csv_file_path):
-        print(f"Could not load data, please check that {csv_file_path} exists.")
-        return
-    else:
-        print(f"Loading data and preparing for the Network...")
+try:
+    df = pd.read_csv(csv_file_path)
+except Exception as e:
+    print(f"Error reading data: {e}")
+    exit()
 
-    try:
-        df = pd.read_csv(csv_file_path)
-    except Exception as e:
-        print(f"Error reading the CSV file: {e}")
-        return
-    
-    df['datetime'] = pd.to_datetime(df['date'] + ' ' + df['time'])
-    df.sort_values(by='datetime', inplace=True)
-    df_cgm = df[df['type'] == 'cgm'].copy()
-    df_cgm['glucose'] = pd.to_numeric(df_cgm['glucose'])
-    df_cgm.set_index('datetime', inplace=True)
-    df_cgm = df_cgm[['glucose']].resample('5min').mean().interpolate(method='linear')
+# --- 2. Preprocess Data ---
+# Identify rows with missing 'Glucose' or 'Insulin' values
+missing_condition = (df['Glucose'] == 0) | (df['Insulin'] == 0)
 
-    df_cgm['glucose_in_30'] = df_cgm['glucose'].shift(-6)  # 30 minutes ahead (6 * 5min intervals)
-    df_cgm['glucose_change'] = df_cgm['glucose_in_30'] - df_cgm['glucose']
-    df_cgm["is_major_drop"] = (df_cgm['glucose_change'] <= -2.0).astype(int)
-    df_cgm.dropna(subset=['glucose_in_30', 'glucose_change', 'is_major_drop'], inplace=True)
-    print("\nClass distribution ('1' is a major drop):")
-    print(df_cgm['is_major_drop'].value_counts(normalize=True))
+# Create a new target column 'Outcome_Class'
+# 2 = "Could not decide" for unreliable data
+df['Outcome_Class'] = df['Outcome']
+df.loc[missing_condition, 'Outcome_Class'] = 2
 
-    window_size = 12  #Use 12 readings (1 hour) to predict
-    glucose_values = df_cgm['glucose'].values
-    labels = df_cgm['is_major_drop'].values
+# Define features (X) and target (y)
+X = df.drop(columns=['Outcome', 'Outcome_Class'])
+y = df['Outcome_Class']
 
-    X, y = [], []
-    for i in range(len(df_cgm) - window_size):
-        X.append(glucose_values[i:i+window_size])
-        y.append(labels[i + window_size])
+# Split data into training and testing sets
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
 
-    X, y = np.array(X), np.array(y)
-    
-    # Reshape X to be (samples, timesteps, features)
-    X = X.reshape(X.shape[0], X.shape[1], 1)
+# Scale the features
+scaler = StandardScaler()
+x_train_scaled = scaler.fit_transform(X_train)
+x_test_scaled = scaler.transform(X_test)
 
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=50, stratify=y)
+# --- 3. Build and Train ESN Model ---
+# Reservoir parameters
+units = 350
+input_scaling = 1.0
+lr = 0.8
+sr = 0.01
+regularization = 1e-5
 
-    #scaling data
-    scaler = MinMaxScaler(feature_range=(0, 1))
-    X_train_reshaped = X_train.reshape(-1, 1)
-    X_test_reshaped = X_test.reshape(-1, 1)
+# Define Reservoir and Readout nodes
+reservoir = Reservoir(units, input_scaling=input_scaling, sr=sr, lr=lr)
+readout = Ridge(ridge=regularization)
 
-    print("\nFitting the scaler on training data and transforming")
-    scaler.fit(X_train_reshaped)
-    X_train_scaled_reshaped = scaler.transform(X_train_reshaped)
-    X_test_scaled_reshaped = scaler.transform(X_test_reshaped)
+# Create the Echo State Network (ESN)
+esn = reservoir >> readout
 
-    X_train_scaled = X_train_scaled_reshaped.reshape(X_train.shape)
-    X_test_scaled = X_test_scaled_reshaped.reshape(X_test.shape)
-    print(f"Data prepared: {X_train_scaled.shape[0]} training samples, {X_test_scaled.shape[0]} testing samples.")
-    print("\nSetting up reservoir and training the readout")
-    
-    reservoir = Reservoir(units=500, lr=0.24, sr=1.0, name="reservoir")
+# Train the ESN
+esn = esn.fit(x_train_scaled, y_train.values.reshape(-1, 1))
 
-    # Get the last reservoir state for each training sequence
-    train_states = []
-    for x_sample in tqdm(X_train_scaled, desc="Training Progress"):
-        with SuppressOutput(): #keeps the terminal clear from messages from the .run function
-            all_sample_states = reservoir.run(x_sample, reset=True) #resets the state to 0 before processing the next sample
-        train_states.append(all_sample_states[-1])
-    train_states = np.array(train_states)
+# --- 4. Evaluate Model ---
+# Make predictions on the test set
+prediction = esn.run(x_test_scaled)
 
-    readout = LogisticRegression(max_iter=1000, class_weight='balanced')
-    readout.fit(train_states, y_train)
-    print("Training complete.")
-    print("\nEvaluating the model on the test set...")
-    
-    #gets the last state in the reservoir
-    test_states = []
-    for x_sample in tqdm(X_test_scaled, desc="Testing Progress "):
-        with SuppressOutput(): # Suppress verbose output from the run method
-            all_sample_states = reservoir.run(x_sample, reset=True) # Reset state for each independent sample
-        test_states.append(all_sample_states[-1])
-    test_states = np.array(test_states)
-    
-    probabilities = readout.predict_proba(test_states)
+# Process predictions
+clipped_predictions = np.clip(prediction, 0, 2)
+final_predictions = np.round(clipped_predictions).astype(int).flatten()
 
-   
-    custom_threshold = 0.66
-    #selects all rows in numpy arrary from the second column to apply threshold to
-    predictions = (probabilities[:, 1] >= custom_threshold).astype(int)
-    
-    accuracy = accuracy_score(y_test, predictions)
-    print(f"\nModel Accuracy: {accuracy:.4f}")
-    
-    print("\nClassification Report:")
-    print(classification_report(y_test, predictions, target_names=['No Drop', 'Major Drop']))
-    
-    cm = confusion_matrix(y_test, predictions)
-    plt.figure(figsize=(8, 6))
-    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', 
-                xticklabels=['No Drop', 'Major Drop'], 
-                yticklabels=['No Drop', 'Major Drop'])
-    plt.title('Confusion Matrix', fontsize=16)
-    plt.ylabel('Actual Label', fontsize=12)
-    plt.xlabel('Predicted Label', fontsize=12)
-    plt.tight_layout()
-    plt.savefig("results/glucose_confusion_matrix.png")
-    print("\nConfusion matrix plot saved as 'glucose_confusion_matrix.png'")
-    plt.show()
+# Calculate and print overall accuracy
+accuracy = accuracy_score(y_test, final_predictions)
+print(f"Overall Model Accuracy: {accuracy:.2%}\n")
 
-if __name__ == "__main__":
-    main()
+# Print the detailed classification report
+class_labels = ['No Diabetes (0)', 'Diabetes (1)', 'Could Not Decide (2)']
+report = classification_report(y_test, final_predictions, target_names=class_labels, zero_division=0)
+print("Classification Report:")
+print(report)
+
+# Print a side-by-side comparison of actual vs. predicted
+print("\nSample of Predictions vs. Actual Labels:")
+comparison_df = pd.DataFrame({'Actual': y_test, 'Predicted': final_predictions})
+print(comparison_df.head(10))
+
+# --- 5. Generate and Save Confusion Matrix ---
+# Create the confusion matrix
+conf_matrix = confusion_matrix(y_test, final_predictions)
+
+# Plot the confusion matrix using a heatmap
+plt.figure(figsize=(8, 6))
+sns.heatmap(conf_matrix, annot=True, fmt='d', cmap='Blues',
+            xticklabels=class_labels, yticklabels=class_labels)
+plt.xlabel('Predicted Labels')
+plt.ylabel('True Labels')
+plt.title('Confusion Matrix')
+
+# Save the plot to a file
+plt.savefig('confusion_matrix.png')
+
+print("\nConfusion matrix saved to confusion_matrix.png")
